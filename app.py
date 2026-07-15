@@ -1,4 +1,4 @@
-# app.py - Fixed for Vercel
+# app.py - Fixed for Vercel (No Font Dependencies)
 import asyncio
 import time
 import httpx
@@ -11,7 +11,7 @@ from flask import Flask, request, jsonify, render_template_string, Response
 from flask_cors import CORS
 from google.protobuf import json_format
 from Crypto.Cipher import AES
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw
 import sys
 
 # ============= PATH FIX =============
@@ -62,7 +62,7 @@ def check_admin_key(key: str) -> bool:
     stored = base64.b64decode(key_store['admin_key']).decode()
     return key == stored
 
-# ============= CONFIG UPDATE =============
+# ============= CONFIG UPDATE (Sync for Vercel) =============
 def update_config_sync():
     """Sync version for Vercel"""
     if cached_config['last_update'] and (time.time() - cached_config['last_update']) < 1800:
@@ -87,7 +87,7 @@ def update_config_sync():
 def config_ready() -> bool:
     return cached_config['login_url'] is not None and cached_config['version'] is not None
 
-# ============= TOKEN FUNCTIONS (Async) =============
+# ============= TOKEN FUNCTIONS =============
 async def create_jwt(region: str):
     account = get_account_credentials(region)
     token_val, open_id = await get_access_token(account)
@@ -260,28 +260,9 @@ def format_response(data):
         "socialinfo": data.get("socialInfo", {})
     }
 
-# ============= IMAGE GENERATION FUNCTIONS =============
+# ============= IMAGE GENERATION (WITHOUT FONTS) =============
 ICON_CDN_BASE64 = "aHR0cHM6Ly9jZG4uanNkZWxpdnIubmV0L2doL1NoYWhHQ3JlYXRvci9pY29uQG1haW4vUE5H"
 ICON_CDN_URL = base64.b64decode(ICON_CDN_BASE64).decode("utf-8")
-
-FONT_FILE = os.path.join(current_dir, "arial_unicode_bold.otf")
-FONT_CHEROKEE = os.path.join(current_dir, "NotoSansCherokee.ttf")
-
-AVATAR_ZOOM = 1.26
-AVATAR_SHIFT_Y = 0
-AVATAR_SHIFT_X = 0
-BANNER_START_X = 0.25
-BANNER_START_Y = 0.29
-BANNER_END_X = 0.81
-BANNER_END_Y = 0.65
-
-def load_unicode_font(size, font_path=FONT_FILE):
-    try:
-        if os.path.exists(font_path):
-            return ImageFont.truetype(font_path, size)
-    except Exception:
-        pass
-    return ImageFont.load_default()
 
 async def fetch_icon_bytes(item_id):
     if not item_id or str(item_id) in ("0", "None"):
@@ -303,94 +284,65 @@ def bytes_to_image(img_bytes):
             pass
     return Image.new("RGBA", (100, 100), (0, 0, 0, 0))
 
-def is_cherokee(ch):
-    return 0x13A0 <= ord(ch) <= 0x13FF or 0xAB70 <= ord(ch) <= 0xABBF
-
-def build_banner_image(name, level, guild, avatar_bytes, banner_bytes, pin_bytes):
+def build_banner_image_simple(name, level, guild, avatar_bytes, banner_bytes, pin_bytes):
+    """Simplified banner without fonts"""
     avatar_img = bytes_to_image(avatar_bytes)
     banner_img = bytes_to_image(banner_bytes)
-    pin_img = bytes_to_image(pin_bytes)
-
+    
     TARGET_HEIGHT = 400
-
-    zoom_size = int(TARGET_HEIGHT * AVATAR_ZOOM)
-    avatar_img = avatar_img.resize((zoom_size, zoom_size), Image.LANCZOS)
-    c = zoom_size // 2
-    h = TARGET_HEIGHT // 2
-    avatar_img = avatar_img.crop((
-        c - h - AVATAR_SHIFT_X, c - h - AVATAR_SHIFT_Y,
-        c + h - AVATAR_SHIFT_X, c + h - AVATAR_SHIFT_Y
-    ))
-
-    banner_img = banner_img.rotate(3, expand=True)
-    bw, bh = banner_img.size
-    banner_img = banner_img.crop((bw * BANNER_START_X, bh * BANNER_START_Y, bw * BANNER_END_X, bh * BANNER_END_Y))
-    bw, bh = banner_img.size
-    banner_img = banner_img.resize((int(TARGET_HEIGHT * (bw / bh) * 2), TARGET_HEIGHT), Image.LANCZOS)
-
+    
+    # Resize avatar
+    avatar_img = avatar_img.resize((TARGET_HEIGHT, TARGET_HEIGHT), Image.LANCZOS)
+    
+    # Resize banner
+    banner_img = banner_img.resize((TARGET_HEIGHT * 2, TARGET_HEIGHT), Image.LANCZOS)
+    
+    # Create final image
     final = Image.new("RGBA", (avatar_img.width + banner_img.width, TARGET_HEIGHT))
     final.paste(avatar_img, (0, 0))
     final.paste(banner_img, (avatar_img.width, 0))
-
+    
+    # Simple text drawing without fonts
     draw = ImageDraw.Draw(final)
-    font_big = load_unicode_font(125)
-    font_big_c = load_unicode_font(125, FONT_CHEROKEE)
-    font_small = load_unicode_font(95)
-    font_small_c = load_unicode_font(95, FONT_CHEROKEE)
-    font_lvl = load_unicode_font(50)
-
-    def draw_text(x, y, text, f_main, f_alt, stroke):
-        text = text or ""
-        cx = x
-        for ch in text:
-            f = f_alt if is_cherokee(ch) else f_main
-            for dx in range(-stroke, stroke + 1):
-                for dy in range(-stroke, stroke + 1):
-                    draw.text((cx + dx, y + dy), ch, font=f, fill="black")
-            draw.text((cx, y), ch, font=f, fill="white")
-            cx += f.getlength(ch)
-
-    draw_text(avatar_img.width + 65, 40, name or "Unknown", font_big, font_big_c, 4)
-    draw_text(avatar_img.width + 65, 220, guild or "", font_small, font_small_c, 3)
-
-    if pin_img.size != (100, 100):
-        pin_img = pin_img.resize((130, 130))
-        final.paste(pin_img, (0, TARGET_HEIGHT - 130), pin_img)
-
-    lvl = f"Lvl.{level or 0}"
-    w, h_txt = draw.textbbox((0, 0), lvl, font=font_lvl)[2:]
-    draw.rectangle([final.width - w - 60, TARGET_HEIGHT - h_txt - 50, final.width, TARGET_HEIGHT], fill="black")
-    draw.text((final.width - w - 30, TARGET_HEIGHT - h_txt - 40), lvl, font=font_lvl, fill="white")
-
+    
+    # Draw name using default font
+    try:
+        from PIL import ImageFont
+        font = ImageFont.load_default()
+        draw.text((avatar_img.width + 10, 20), name or "Unknown", fill="white", font=font)
+        draw.text((avatar_img.width + 10, 60), f"Level: {level or 0}", fill="white", font=font)
+        if guild:
+            draw.text((avatar_img.width + 10, 100), f"Guild: {guild}", fill="white", font=font)
+    except:
+        pass
+    
     out = io.BytesIO()
     final.save(out, "PNG")
     out.seek(0)
     return out
 
-async def generate_banner_png(raw_data):
+async def generate_banner_png_simple(raw_data):
     basic = raw_data.get("basicInfo", {})
     clan = raw_data.get("clanBasicInfo", {})
-
+    
     name = basic.get("nickname")
     level = basic.get("level")
     guild = clan.get("clanName")
     avatar_id = basic.get("headPic")
     banner_id = basic.get("bannerId")
-    pin_id = basic.get("pinId")
-
-    avatar_bytes, banner_bytes, pin_bytes = await asyncio.gather(
+    
+    avatar_bytes, banner_bytes = await asyncio.gather(
         fetch_icon_bytes(avatar_id),
         fetch_icon_bytes(banner_id),
-        fetch_icon_bytes(pin_id),
     )
-
+    
     loop = asyncio.get_event_loop()
     img_io = await loop.run_in_executor(
-        None, build_banner_image, name, level, guild, avatar_bytes, banner_bytes, pin_bytes
+        None, build_banner_image_simple, name, level, guild, avatar_bytes, banner_bytes, None
     )
     return img_io
 
-# ============= OUTFIT IMAGE GENERATION =============
+# ============= OUTFIT IMAGE (WITHOUT FONTS) =============
 OUTFIT_BG_FILE = os.path.join(current_dir, "outfit_bg.png")
 OUTFIT_RING_SLOTS = [
     (182, 169, 86), (433, 305, 75), (989, 302, 90), (1220, 169, 75),
@@ -407,37 +359,36 @@ def make_circular_icon(img_bytes, size):
     out.paste(icon, (0, 0), mask)
     return out
 
-async def generate_outfit_png(raw_data):
+async def generate_outfit_png_simple(raw_data):
     profile = raw_data.get("profileInfo", {})
     basic = raw_data.get("basicInfo", {})
     clothes = list(profile.get("clothes", []) or [])
-
+    
     pet_skin = (raw_data.get("petInfo", {}) or {}).get("skinId")
     if pet_skin:
         clothes.append(pet_skin)
-
+    
     weapon_skins = basic.get("weaponSkinShows", []) or []
     for w in weapon_skins:
         wid = w.get("skinId") if isinstance(w, dict) else w
         if wid:
             clothes.append(wid)
-
+    
     item_ids = clothes[:len(OUTFIT_RING_SLOTS)]
-
     icon_bytes_list = await asyncio.gather(*[fetch_icon_bytes(i) for i in item_ids])
-
+    
     if os.path.exists(OUTFIT_BG_FILE):
         bg = Image.open(OUTFIT_BG_FILE).convert("RGBA")
     else:
         bg = Image.new("RGBA", (1400, 1123), (10, 8, 30, 255))
-
+    
     for (cx, cy, r), icon_bytes in zip(OUTFIT_RING_SLOTS, icon_bytes_list):
         if not icon_bytes:
             continue
         size = max(40, int(2 * (r - RING_PADDING)))
         icon = make_circular_icon(icon_bytes, size)
         bg.paste(icon, (cx - size // 2, cy - size // 2), icon)
-
+    
     out = io.BytesIO()
     bg.save(out, "PNG")
     out.seek(0)
@@ -731,7 +682,6 @@ def get_account_info():
 
         print(f"🔍 UID: {uid} requested")
         
-        # Sync fetch
         raw_data = sync_fetch_player_raw(uid)
         
         if not raw_data:
@@ -739,11 +689,11 @@ def get_account_info():
 
         response_json = format_response(raw_data)
 
-        # Generate images
+        # Generate simple images without fonts
         try:
             banner_io, outfit_io = asyncio.run(asyncio.gather(
-                generate_banner_png(raw_data),
-                generate_outfit_png(raw_data),
+                generate_banner_png_simple(raw_data),
+                generate_outfit_png_simple(raw_data),
             ))
             response_json["_images"] = {
                 "banner": "data:image/png;base64," + base64.b64encode(banner_io.getvalue()).decode(),
@@ -773,7 +723,7 @@ def get_banner_image():
         if not raw_data:
             return jsonify({"error": "Player not found"}), 404
 
-        img_io = asyncio.run(generate_banner_png(raw_data))
+        img_io = asyncio.run(generate_banner_png_simple(raw_data))
         return Response(img_io.getvalue(), mimetype="image/png")
     except Exception as e:
         print(f"❌ Unhandled /banner error: {e}")
@@ -794,7 +744,7 @@ def get_outfit_image():
         if not raw_data:
             return jsonify({"error": "Player not found"}), 404
 
-        img_io = asyncio.run(generate_outfit_png(raw_data))
+        img_io = asyncio.run(generate_outfit_png_simple(raw_data))
         return Response(img_io.getvalue(), mimetype="image/png")
     except Exception as e:
         print(f"❌ Unhandled /outfit error: {e}")
