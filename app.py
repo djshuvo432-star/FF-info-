@@ -1,3 +1,4 @@
+# app.py - Fixed for Vercel
 import asyncio
 import time
 import httpx
@@ -11,9 +12,9 @@ from flask_cors import CORS
 from google.protobuf import json_format
 from Crypto.Cipher import AES
 from PIL import Image, ImageDraw, ImageFont
+import sys
 
 # ============= PATH FIX =============
-import sys
 current_dir = os.path.dirname(os.path.abspath(__file__))
 proto_dir = os.path.join(current_dir, 'proto')
 if proto_dir not in sys.path:
@@ -31,24 +32,17 @@ except ImportError:
         print(f"❌ Proto import error: {e}")
         sys.exit(1)
 
-# ============= সিকিউরিটি কী ও ধ্রুবক =============
+# ============= SECURITY KEYS =============
 MAIN_KEY = base64.b64decode('WWcmdGMlREV1aDYlWmNeOA==')
 MAIN_IV = base64.b64decode('Nm95WkRyMjJFM3ljaGpNJQ==')
 USERAGENT = "Dalvik/2.1.0 (Linux; U; Android 13; CPH2095 Build/RKQ1.211119.001)"
 REGION_PRIORITY = ["ME", "BD", "IND"]
-SUPPORTED_REGIONS = set(REGION_PRIORITY)
 
 # ============= Flask App =============
 app = Flask(__name__)
 CORS(app)
 
-@app.errorhandler(Exception)
-def handle_any_error(e):
-    # ফ্লাস্কের ডিফল্ট HTML error page বন্ধ, সবসময় JSON রিটার্ন
-    code = getattr(e, 'code', 500)
-    return jsonify({"error": str(e)}), code if isinstance(code, int) else 500
-
-# ইন-মেমোরি ক্যাশ (Vercel-এ রিকোয়েস্ট জুড়ে থাকতে পারে, cold start এ খালি হয়)
+# ============= IN-MEMORY CACHE =============
 cached_tokens = defaultdict(dict)
 key_store = {
     'api_key': base64.b64encode(b'KAWSAR').decode(),
@@ -68,32 +62,32 @@ def check_admin_key(key: str) -> bool:
     stored = base64.b64decode(key_store['admin_key']).decode()
     return key == stored
 
-# ============= কনফিগ (ঠান্ডা স্টার্ট এলে আপডেট হয়) =============
-async def update_config():
-    """প্রতি রিকোয়েস্টের আগে চেক, ৩০ মিনিট পুরনো হলে রিফ্রেশ"""
+# ============= CONFIG UPDATE =============
+def update_config_sync():
+    """Sync version for Vercel"""
     if cached_config['last_update'] and (time.time() - cached_config['last_update']) < 1800:
-        return  # এখনও ফ্রেশ
-
+        return
+    
     try:
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            resp = await client.get("https://mg24-auto-update.vercel.app/")
-            if resp.status_code == 200:
-                data = resp.json()
-                src = data.get("SourceUpdate_info", {})
-                cached_config['version'] = src.get("latest_release_version")
-                raw_login = src.get("server_url", "").rstrip("/")
-                if raw_login and not raw_login.endswith("/MajorLogin"):
-                    raw_login += "/MajorLogin"
-                cached_config['login_url'] = raw_login
-                cached_config['last_update'] = time.time()
-                print(f"✅ Config updated: version={cached_config['version']}")
+        import requests
+        resp = requests.get("https://mg24-auto-update.vercel.app/", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            src = data.get("SourceUpdate_info", {})
+            cached_config['version'] = src.get("latest_release_version")
+            raw_login = src.get("server_url", "").rstrip("/")
+            if raw_login and not raw_login.endswith("/MajorLogin"):
+                raw_login += "/MajorLogin"
+            cached_config['login_url'] = raw_login
+            cached_config['last_update'] = time.time()
+            print(f"✅ Config updated: version={cached_config['version']}")
     except Exception as e:
         print(f"❌ Config update error: {e}")
 
 def config_ready() -> bool:
     return cached_config['login_url'] is not None and cached_config['version'] is not None
 
-# ============= টোকেন =============
+# ============= TOKEN FUNCTIONS (Async) =============
 async def create_jwt(region: str):
     account = get_account_credentials(region)
     token_val, open_id = await get_access_token(account)
@@ -136,7 +130,6 @@ async def create_jwt(region: str):
         return True
 
 async def get_token_info(region: str):
-    """টোকেন থাকলে দেয়, না থাকলে জেনারেট করে"""
     info = cached_tokens.get(region)
     if info and info['expires_at'] > time.time():
         return info['token'], info['region'], info['server_url']
@@ -148,7 +141,7 @@ async def get_token_info(region: str):
     info = cached_tokens[region]
     return info['token'], info['region'], info['server_url']
 
-# ============= সহায়ক ফাংশন =============
+# ============= HELPER FUNCTIONS =============
 def pad(text: bytes) -> bytes:
     padding_length = AES.block_size - (len(text) % AES.block_size)
     return text + bytes([padding_length] * padding_length)
@@ -267,7 +260,7 @@ def format_response(data):
         "socialinfo": data.get("socialInfo", {})
     }
 
-# ============= ব্যানার ইমেজ জেনারেশন =============
+# ============= IMAGE GENERATION FUNCTIONS =============
 ICON_CDN_BASE64 = "aHR0cHM6Ly9jZG4uanNkZWxpdnIubmV0L2doL1NoYWhHQ3JlYXRvci9pY29uQG1haW4vUE5H"
 ICON_CDN_URL = base64.b64decode(ICON_CDN_BASE64).decode("utf-8")
 
@@ -375,7 +368,6 @@ def build_banner_image(name, level, guild, avatar_bytes, banner_bytes, pin_bytes
     return out
 
 async def generate_banner_png(raw_data):
-    """raw_data হলো GetAccountInformation থেকে সরাসরি পাওয়া ডাটা, বাইরের কোনো info API লাগবে না"""
     basic = raw_data.get("basicInfo", {})
     clan = raw_data.get("clanBasicInfo", {})
 
@@ -398,15 +390,14 @@ async def generate_banner_png(raw_data):
     )
     return img_io
 
-# ============= আউটফিট শোকেস ইমেজ জেনারেশন =============
+# ============= OUTFIT IMAGE GENERATION =============
 OUTFIT_BG_FILE = os.path.join(current_dir, "outfit_bg.png")
-# (center_x, center_y, ring_radius) - সরাসরি ব্যাকগ্রাউন্ড ছবি থেকে মেপে বের করা
 OUTFIT_RING_SLOTS = [
     (182, 169, 86), (433, 305, 75), (989, 302, 90), (1220, 169, 75),
     (173, 626, 81), (1223, 628, 92), (449, 865, 89), (250, 980, 88),
     (1013, 850, 87),
 ]
-RING_PADDING = 16  # গ্লো বর্ডারের সাথে ওভারল্যাপ এড়াতে
+RING_PADDING = 16
 
 def make_circular_icon(img_bytes, size):
     icon = bytes_to_image(img_bytes).resize((size, size), Image.LANCZOS)
@@ -452,7 +443,24 @@ async def generate_outfit_png(raw_data):
     out.seek(0)
     return out
 
-# ============= Routes =============
+# ============= SYNC WRAPPERS FOR VERCEL =============
+def sync_fetch_player_raw(uid):
+    """Sync wrapper for Vercel"""
+    update_config_sync()
+    if not config_ready():
+        return None
+    
+    for region in REGION_PRIORITY:
+        try:
+            data = asyncio.run(GetAccountInformation(uid, region))
+            if data:
+                return data
+        except Exception as e:
+            print(f"❌ Region {region} failed: {e}")
+            continue
+    return None
+
+# ============= ROUTES =============
 @app.route('/')
 def web_ui():
     html = '''<!DOCTYPE html>
@@ -476,17 +484,6 @@ def web_ui():
       min-height: 100vh;
       display: flex; flex-direction: column; align-items: center;
       padding: 20px;
-    }
-    body::before {
-      content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
-      background-image:
-        radial-gradient(1px 1px at 10% 20%, #fff, transparent),
-        radial-gradient(1px 1px at 80% 40%, #fff, transparent),
-        radial-gradient(1px 1px at 40% 70%, #fff, transparent),
-        radial-gradient(1px 1px at 60% 15%, #fff, transparent),
-        radial-gradient(1px 1px at 90% 85%, #fff, transparent),
-        radial-gradient(1px 1px at 25% 90%, #fff, transparent);
-      opacity: 0.5;
     }
     .container { width: 100%; max-width: 600px; position: relative; z-index: 1; }
     h1 {
@@ -541,7 +538,6 @@ def web_ui():
     .admin-panel { display: none; }
     .error { color: #ff6b8b; padding: 10px; text-align: center; }
     .loading { text-align: center; color: #8fd6ff; padding: 10px; }
-    pre { text-align: left; font-size: 12px; white-space: pre-wrap; word-break: break-all; color: #cfcaf5; }
     .banner-wrap { width: 100%; overflow-x: auto; border-radius: 10px; margin-bottom: 15px; background: rgba(0,0,0,0.3); padding: 8px; border: 1px solid rgba(150,120,255,0.25); }
     .banner-img { display: block; max-width: 100%; height: auto; border-radius: 8px; margin: 0 auto; }
     .visual-group { margin-bottom: 14px; padding-bottom: 4px; border-bottom: 1px solid rgba(150,120,255,0.15); }
@@ -630,7 +626,6 @@ def web_ui():
             </div>`;
           };
 
-          // যেকোনো অবজেক্ট থেকে সুন্দর stat-group বানানোর জেনারিক রেন্ডারার (raw JSON এর বদলে)
           const renderGroup = (title, obj) => {
             if (!obj || typeof obj !== 'object' || Object.keys(obj).length === 0) return '';
             let inner = '';
@@ -724,23 +719,8 @@ def web_ui():
 </html>'''
     return render_template_string(html)
 
-async def fetch_player_raw(uid):
-    """একবার config+region লজিক রান করে raw account data রিটার্ন করে, অথবা None"""
-    await update_config()
-    if not config_ready():
-        raise RuntimeError("Server config not ready, try again shortly")
-    for region in REGION_PRIORITY:
-        try:
-            data = await GetAccountInformation(uid, region)
-            if data:
-                return data
-        except Exception as e:
-            print(f"❌ Region {region} failed: {e}")
-            continue
-    return None
-
 @app.route('/get')
-async def get_account_info():
+def get_account_info():
     try:
         uid = request.args.get('uid')
         key = request.args.get('key')
@@ -750,24 +730,21 @@ async def get_account_info():
             return jsonify({"error": "Invalid API key"}), 403
 
         print(f"🔍 UID: {uid} requested")
-        try:
-            raw_data = await fetch_player_raw(uid)
-        except Exception as e:
-            print(f"❌ fetch_player_raw crashed: {e}")
-            return jsonify({"error": "Config service unreachable, try again"}), 503
-
+        
+        # Sync fetch
+        raw_data = sync_fetch_player_raw(uid)
+        
         if not raw_data:
             return jsonify({"error": "Player not found"}), 404
 
         response_json = format_response(raw_data)
 
-        # ব্যানার + আউটফিট ছবি একই রিকোয়েস্টে জেনারেট করে base64 হিসেবে এম্বেড করা,
-        # যাতে ফ্রন্টএন্ডকে আলাদা করে আবার /banner, /outfit কল করতে না হয়
+        # Generate images
         try:
-            banner_io, outfit_io = await asyncio.gather(
+            banner_io, outfit_io = asyncio.run(asyncio.gather(
                 generate_banner_png(raw_data),
                 generate_outfit_png(raw_data),
-            )
+            ))
             response_json["_images"] = {
                 "banner": "data:image/png;base64," + base64.b64encode(banner_io.getvalue()).decode(),
                 "outfit": "data:image/png;base64," + base64.b64encode(outfit_io.getvalue()).decode(),
@@ -778,12 +755,11 @@ async def get_account_info():
 
         return jsonify(response_json)
     except Exception as e:
-        # শেষ ভরসা: কিছুতেই যেন HTML error page ফেরত না যায়
         print(f"❌ Unhandled /get error: {e}")
         return jsonify({"error": f"Internal error: {str(e)}"}), 500
 
 @app.route('/banner')
-async def get_banner_image():
+def get_banner_image():
     try:
         uid = request.args.get('uid')
         key = request.args.get('key')
@@ -792,23 +768,19 @@ async def get_banner_image():
         if not check_api_key(key):
             return jsonify({"error": "Invalid API key"}), 403
 
-        try:
-            raw_data = await fetch_player_raw(uid)
-        except Exception as e:
-            print(f"❌ fetch_player_raw crashed: {e}")
-            return jsonify({"error": "Config service unreachable, try again"}), 503
-
+        raw_data = sync_fetch_player_raw(uid)
+        
         if not raw_data:
             return jsonify({"error": "Player not found"}), 404
 
-        img_io = await generate_banner_png(raw_data)
+        img_io = asyncio.run(generate_banner_png(raw_data))
         return Response(img_io.getvalue(), mimetype="image/png")
     except Exception as e:
         print(f"❌ Unhandled /banner error: {e}")
         return jsonify({"error": f"Internal error: {str(e)}"}), 500
 
 @app.route('/outfit')
-async def get_outfit_image():
+def get_outfit_image():
     try:
         uid = request.args.get('uid')
         key = request.args.get('key')
@@ -817,26 +789,22 @@ async def get_outfit_image():
         if not check_api_key(key):
             return jsonify({"error": "Invalid API key"}), 403
 
-        try:
-            raw_data = await fetch_player_raw(uid)
-        except Exception as e:
-            print(f"❌ fetch_player_raw crashed: {e}")
-            return jsonify({"error": "Config service unreachable, try again"}), 503
-
+        raw_data = sync_fetch_player_raw(uid)
+        
         if not raw_data:
             return jsonify({"error": "Player not found"}), 404
 
-        img_io = await generate_outfit_png(raw_data)
+        img_io = asyncio.run(generate_outfit_png(raw_data))
         return Response(img_io.getvalue(), mimetype="image/png")
     except Exception as e:
         print(f"❌ Unhandled /outfit error: {e}")
         return jsonify({"error": f"Internal error: {str(e)}"}), 500
 
 @app.route('/refresh')
-async def refresh_tokens():
-    await update_config()
-    tasks = [create_jwt(r) for r in REGION_PRIORITY]
-    await asyncio.gather(*tasks)
+def refresh_tokens():
+    update_config_sync()
+    for region in REGION_PRIORITY:
+        asyncio.run(create_jwt(region))
     return jsonify({"status": "refreshed", "count": len(cached_tokens)})
 
 @app.route('/change_key')
@@ -851,6 +819,6 @@ def change_key_endpoint():
     print(f"🔑 User API key changed to: {new_key}")
     return jsonify({"status": "success", "message": "API key updated"})
 
-# ============= Entry =============
+# ============= ENTRY =============
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 2590)))
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 2510)))
